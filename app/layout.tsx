@@ -1,63 +1,60 @@
 import type { Metadata } from "next";
-import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
+import { JetBrains_Mono, Space_Grotesk } from "next/font/google";
+
 import "./globals.css";
 
-const bodyFont = Space_Grotesk({
-  variable: "--font-body",
+const headingFont = Space_Grotesk({
   subsets: ["latin"],
-  display: "swap"
+  variable: "--font-space-grotesk",
+  display: "swap",
 });
 
-const monoFont = IBM_Plex_Mono({
-  variable: "--font-mono",
+const monoFont = JetBrains_Mono({
   subsets: ["latin"],
+  variable: "--font-jetbrains-mono",
   display: "swap",
-  weight: ["400", "500"]
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? "https://git-history-search.app"),
   title: {
     default: "Git History Search",
-    template: "%s | Git History Search"
+    template: "%s | Git History Search",
   },
   description:
-    "Find the exact commits, PRs, and issues that changed auth, rate limiting, or any codepath by asking in plain English.",
-  keywords: [
-    "git history search",
-    "semantic code search",
-    "github commit search",
-    "developer productivity",
-    "engineering onboarding"
-  ],
+    "Natural-language search across GitHub commits, pull requests, and issues. Find historical context for bugs, auth flow changes, and incident timelines in seconds.",
   openGraph: {
     title: "Git History Search",
     description:
-      "Ask your repository questions in English and get cited commits, PRs, and issues in seconds.",
-    type: "website",
+      "Ask plain-English questions about repository history and get ranked commit/PR/issue evidence.",
     url: "/",
-    siteName: "Git History Search"
+    siteName: "Git History Search",
+    type: "website",
   },
   twitter: {
     card: "summary_large_image",
     title: "Git History Search",
     description:
-      "Find all commits that touched auth, rate limiting, or any subsystem using natural language."
+      "AI-powered semantic search over git history for onboarding and incident debugging.",
   },
   robots: {
     index: true,
-    follow: true
-  }
+    follow: true,
+  },
 };
 
 export default function RootLayout({
-  children
+  children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${bodyFont.variable} ${monoFont.variable}`}>
-      <body className="min-h-screen bg-[#0d1117] text-slate-100 antialiased">{children}</body>
+    <html
+      lang="en"
+      className={`dark ${headingFont.variable} ${monoFont.variable} h-full antialiased`}
+      suppressHydrationWarning
+    >
+      <body className="min-h-full bg-[#0d1117] text-zinc-100">{children}</body>
     </html>
   );
 }

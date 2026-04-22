@@ -1,80 +1,162 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
-import type { PlanTier } from "@/lib/paywall";
+import crypto from "node:crypto";
 
-export const PLAN_CONFIG: Record<PlanTier, { label: string; priceLabel: string; repoLimit: number }> = {
-  starter: {
-    label: "Starter",
-    priceLabel: "$9/mo",
-    repoLimit: 1
-  },
-  team: {
-    label: "Team",
-    priceLabel: "$39/mo",
-    repoLimit: 10
-  }
-};
+import { lemonSqueezySetup } from "@lemonsqueezy/lemonsqueezy.js";
+import type { NextRequest, NextResponse } from "next/server";
 
-function buildBaseCheckoutUrl(): string {
-  const productId = process.env.NEXT_PUBLIC_LEMON_SQUEEZY_PRODUCT_ID?.trim();
+export const PAID_ACCESS_COOKIE = "ghs_paid_access";
+export const PAID_EMAIL_COOKIE = "ghs_paid_email";
+const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
-  if (!productId) {
-    return "";
-  }
-
-  if (productId.startsWith("https://")) {
-    return productId;
-  }
-
-  return `https://checkout.lemonsqueezy.com/buy/${productId}`;
+export interface StripeWebhookEvent {
+  id?: string;
+  type?: string;
+  data?: {
+    object?: Record<string, unknown>;
+  };
 }
 
-export function buildCheckoutUrl(
-  plan: PlanTier,
-  context: { login?: string; email?: string } = {}
-): string {
-  const base = buildBaseCheckoutUrl();
-  if (!base) {
-    return "";
-  }
-
-  const url = new URL(base);
-  url.searchParams.set("embed", "1");
-  url.searchParams.set("checkout[custom][plan]", plan);
-
-  if (context.login) {
-    url.searchParams.set("checkout[custom][login]", context.login);
-  }
-
-  if (context.email) {
-    url.searchParams.set("checkout[email]", context.email);
-    url.searchParams.set("checkout[custom][email]", context.email);
-  }
-
-  return url.toString();
+export function getPaymentLink(): string {
+  return process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK ?? "";
 }
 
-export function verifyLemonSignature(payload: string, signatureHeader: string | null): boolean {
-  const secret = process.env.LEMON_SQUEEZY_WEBHOOK_SECRET;
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
 
-  if (!secret || !signatureHeader) {
+export function hasPaidAccess(request: NextRequest): boolean {
+  return request.cookies.get(PAID_ACCESS_COOKIE)?.value === "true";
+}
+
+export function setPaidAccessCookies(response: NextResponse, email: string): void {
+  const normalized = normalizeEmail(email);
+  const secure = process.env.NODE_ENV === "production";
+
+  response.cookies.set(PAID_ACCESS_COOKIE, "true", {
+    httpOnly: true,
+    path: "/",
+    sameSite: "lax",
+    secure,
+    maxAge: COOKIE_MAX_AGE_SECONDS,
+  });
+
+  response.cookies.set(PAID_EMAIL_COOKIE, normalized, {
+    httpOnly: true,
+    path: "/",
+    sameSite: "lax",
+    secure,
+    maxAge: COOKIE_MAX_AGE_SECONDS,
+  });
+}
+
+export function clearPaidAccessCookies(response: NextResponse): void {
+  response.cookies.set(PAID_ACCESS_COOKIE, "", {
+    maxAge: 0,
+    path: "/",
+  });
+  response.cookies.set(PAID_EMAIL_COOKIE, "", {
+    maxAge: 0,
+    path: "/",
+  });
+}
+
+function safeCompare(hexA: string, hexB: string): boolean {
+  if (hexA.length !== hexB.length) {
     return false;
   }
 
-  const digest = createHmac("sha256", secret).update(payload).digest("hex");
+  const a = Buffer.from(hexA, "hex");
+  const b = Buffer.from(hexB, "hex");
+  return crypto.timingSafeEqual(a, b);
+}
 
-  try {
-    const left = Buffer.from(digest, "hex");
-    const right = Buffer.from(signatureHeader, "hex");
-    if (left.length !== right.length) {
-      return false;
+export function verifyStripeSignature(
+  payload: string,
+  signatureHeader: string | null,
+  webhookSecret: string,
+): boolean {
+  if (!signatureHeader) {
+    return false;
+  }
+
+  const parts = signatureHeader.split(",").reduce<Record<string, string>>((acc, part) => {
+    const [key, value] = part.split("=");
+    if (key && value) {
+      acc[key.trim()] = value.trim();
     }
+    return acc;
+  }, {});
 
-    return timingSafeEqual(left, right);
-  } catch {
+  const timestamp = parts.t;
+  const signature = parts.v1;
+
+  if (!timestamp || !signature) {
     return false;
   }
+
+  const signedPayload = `${timestamp}.${payload}`;
+  const expected = crypto
+    .createHmac("sha256", webhookSecret)
+    .update(signedPayload, "utf8")
+    .digest("hex");
+
+  return safeCompare(expected, signature);
 }
 
-export function extractPlan(value: unknown): PlanTier {
-  return value === "team" ? "team" : "starter";
+function getStringField(
+  obj: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = obj[key];
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+  return null;
+}
+
+export function extractPaidEmailFromStripeEvent(event: StripeWebhookEvent): string | null {
+  const object = event.data?.object;
+  if (!object) {
+    return null;
+  }
+
+  const customerEmail = getStringField(object, "customer_email");
+  if (customerEmail) {
+    return normalizeEmail(customerEmail);
+  }
+
+  const customerDetails = object.customer_details;
+  if (
+    typeof customerDetails === "object" &&
+    customerDetails !== null &&
+    "email" in customerDetails &&
+    typeof (customerDetails as { email?: unknown }).email === "string"
+  ) {
+    return normalizeEmail((customerDetails as { email: string }).email);
+  }
+
+  const billingDetails = object.billing_details;
+  if (
+    typeof billingDetails === "object" &&
+    billingDetails !== null &&
+    "email" in billingDetails &&
+    typeof (billingDetails as { email?: unknown }).email === "string"
+  ) {
+    return normalizeEmail((billingDetails as { email: string }).email);
+  }
+
+  return null;
+}
+
+export function setupLemonSqueezy(): void {
+  const apiKey = process.env.LEMONSQUEEZY_API_KEY;
+  if (!apiKey) {
+    return;
+  }
+
+  lemonSqueezySetup({
+    apiKey,
+    onError: () => {
+      return;
+    },
+  });
 }

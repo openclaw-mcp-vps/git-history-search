@@ -1,201 +1,152 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { ExternalLink, Loader2, Search } from "lucide-react";
+import { FormEvent, useState } from "react";
+import { Loader2, Search } from "lucide-react";
+
+import { SearchResultHit, SearchResults } from "@/components/search-results";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 
-interface IndexedRepo {
-  fullName: string;
-  indexedCount: number;
-  syncedAt: string;
-}
-
-interface SearchMatch {
-  id: string;
-  type: string;
-  title: string;
-  url: string;
-  score: number;
-  excerpt: string;
-  createdAt: string;
+interface SearchResponse {
+  ok: boolean;
+  summary?: string;
+  query?: string;
+  hits?: SearchResultHit[];
+  error?: string;
 }
 
 interface SearchInterfaceProps {
-  repos: IndexedRepo[];
+  repoFullName: string;
 }
 
-export function SearchInterface({ repos }: SearchInterfaceProps) {
-  const [selectedRepo, setSelectedRepo] = useState(repos[0]?.fullName || "");
-  const [query, setQuery] = useState(
-    "Which commits and PRs introduced or fixed auth rate limiting behavior?"
-  );
-  const [answer, setAnswer] = useState("");
-  const [matches, setMatches] = useState<SearchMatch[]>([]);
+const sampleQueries = [
+  "which pull requests fixed auth bugs",
+  "when did we add rate limiting",
+  "show me commits that changed JWT validation",
+  "issues related to session expiration incidents",
+];
+
+export function SearchInterface({ repoFullName }: SearchInterfaceProps) {
+  const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState("");
+  const [hits, setHits] = useState<SearchResultHit[]>([]);
 
-  const queryExamples = useMemo(
-    () => [
-      "Which PRs fixed auth bugs in the last 6 months?",
-      "When did we add rate limiting to login endpoints?",
-      "Show commits that changed token refresh logic."
-    ],
-    []
-  );
+  const canSearch = repoFullName.length > 0 && query.trim().length > 0 && !loading;
 
-  async function runSearch() {
-    if (!selectedRepo || !query.trim()) {
-      setError("Choose an indexed repo and enter a question.");
-      return;
-    }
-
+  async function runSearch(nextQuery: string) {
     setLoading(true);
-    setError("");
-    setAnswer("");
+    setError(null);
 
     try {
       const response = await fetch("/api/search", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
         },
-        body: JSON.stringify({ repository: selectedRepo, query })
+        body: JSON.stringify({
+          repoFullName,
+          query: nextQuery,
+        }),
       });
 
-      const payload = (await response.json()) as {
-        error?: string;
-        answer?: string;
-        matches?: SearchMatch[];
-      };
+      const json = (await response.json()) as SearchResponse;
 
-      if (!response.ok) {
-        setError(payload.error || "Search failed.");
+      if (!response.ok || !json.ok) {
+        setError(json.error ?? "Search failed.");
+        setSummary("");
+        setHits([]);
         return;
       }
 
-      setAnswer(payload.answer || "No answer generated.");
-      setMatches(payload.matches || []);
+      setSummary(json.summary ?? "");
+      setHits(json.hits ?? []);
     } catch {
-      setError("Search request failed. Verify connectivity and retry.");
+      setError("Search request failed. Check your network and try again.");
+      setSummary("");
+      setHits([]);
     } finally {
       setLoading(false);
     }
   }
 
-  return (
-    <div className="space-y-6">
-      <Card>
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const normalized = query.trim();
+    if (!normalized) {
+      return;
+    }
+    await runSearch(normalized);
+  }
+
+  if (!repoFullName) {
+    return (
+      <Card className="border border-white/10 bg-[#111827]/80">
         <CardHeader>
-          <CardTitle>Ask Your Git History</CardTitle>
+          <CardTitle className="text-zinc-100">Choose and sync a repository first</CardTitle>
+          <CardDescription>
+            Once a repo is synced, ask natural language questions about its commit and PR history.
+          </CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card className="border border-white/10 bg-[#111827]/80">
+        <CardHeader>
+          <CardTitle className="text-zinc-100">Ask about repository history</CardTitle>
+          <CardDescription>
+            Repository: <span className="font-medium text-zinc-200">{repoFullName}</span>
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <label htmlFor="repo" className="text-sm text-slate-400">
-              Indexed repository
-            </label>
-            <select
-              id="repo"
-              className="h-10 w-full rounded-md border border-slate-700 bg-slate-900 px-3 text-sm"
-              value={selectedRepo}
-              onChange={(event) => setSelectedRepo(event.target.value)}
-            >
-              {repos.map((repo) => (
-                <option value={repo.fullName} key={repo.fullName}>
-                  {repo.fullName} ({repo.indexedCount} docs)
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="space-y-2">
-            <label htmlFor="query" className="text-sm text-slate-400">
-              Natural-language query
-            </label>
-            <Textarea
-              id="query"
+          <form className="flex flex-col gap-3 sm:flex-row" onSubmit={handleSubmit}>
+            <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              className="min-h-[120px]"
+              placeholder="Example: when did we introduce auth middleware retries?"
+              className="h-10 bg-[#0b1220] text-zinc-100"
             />
-            <div className="flex flex-wrap gap-2">
-              {queryExamples.map((example) => (
-                <button
-                  key={example}
-                  type="button"
-                  onClick={() => setQuery(example)}
-                  className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
-                >
-                  {example}
-                </button>
-              ))}
-            </div>
-          </div>
+            <Button type="submit" className="h-10 gap-1 bg-cyan-600 text-white hover:bg-cyan-500" disabled={!canSearch}>
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+              Search
+            </Button>
+          </form>
 
-          <Button onClick={runSearch} disabled={loading}>
-            {loading ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Searching indexed history...
-              </>
-            ) : (
-              <>
-                <Search className="h-4 w-4" />
-                Search History
-              </>
-            )}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {sampleQueries.map((sample) => (
+              <button
+                key={sample}
+                type="button"
+                onClick={() => {
+                  setQuery(sample);
+                  void runSearch(sample);
+                }}
+                className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200 transition hover:border-cyan-400 hover:bg-cyan-500/20"
+              >
+                {sample}
+              </button>
+            ))}
+          </div>
 
           {error ? <p className="text-sm text-rose-300">{error}</p> : null}
         </CardContent>
       </Card>
 
-      {answer ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>AI Answer</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="whitespace-pre-wrap text-sm leading-6 text-slate-200">{answer}</p>
+      {loading ? (
+        <Card className="border border-white/10 bg-[#111827]/80">
+          <CardContent className="flex items-center gap-2 py-6 text-sm text-zinc-300">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Ranking commits, pull requests, and issues...
           </CardContent>
         </Card>
       ) : null}
 
-      {matches.length > 0 ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Cited Matches</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ul className="space-y-4">
-              {matches.map((match) => (
-                <li key={match.id} className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
-                  <div className="mb-2 flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <Badge variant="neutral">{match.type}</Badge>
-                      <span className="text-xs text-slate-500">score {match.score}</span>
-                    </div>
-                    <a
-                      className="inline-flex items-center gap-1 text-xs text-sky-300 hover:text-sky-200"
-                      href={match.url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Open
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    </a>
-                  </div>
-                  <p className="mb-1 text-sm font-semibold text-slate-100">{match.title}</p>
-                  <p className="text-xs text-slate-400">{new Date(match.createdAt).toLocaleString()}</p>
-                  <p className="mt-2 text-sm text-slate-300">{match.excerpt}</p>
-                </li>
-              ))}
-            </ul>
-          </CardContent>
-        </Card>
-      ) : null}
+      <SearchResults query={query} summary={summary} hits={hits} />
     </div>
   );
 }

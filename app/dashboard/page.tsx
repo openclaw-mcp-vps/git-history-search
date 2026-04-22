@@ -1,124 +1,118 @@
-import Link from "next/link";
-import { ArrowRight, Github, Lock, SearchCode } from "lucide-react";
-import { PricingCards } from "@/components/pricing-cards";
-import { RepoSelector } from "@/components/repo-selector";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { listAccessibleRepos } from "@/lib/github";
-import { hasPaywallCookie } from "@/lib/paywall";
-import { listIndexedReposForUser } from "@/lib/repositories";
-import { getSessionFromCookies } from "@/lib/session";
+import type { Metadata } from "next";
+import { cookies } from "next/headers";
 
-export const metadata = {
+import { RepoConnector } from "@/components/repo-connector";
+import { SearchInterface } from "@/components/search-interface";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { GITHUB_TOKEN_COOKIE } from "@/lib/github";
+import { PAID_ACCESS_COOKIE } from "@/lib/lemonsqueezy";
+
+export const metadata: Metadata = {
   title: "Dashboard",
-  description: "Connect repositories, sync history, and unlock semantic git search."
+  description: "Connect repositories, sync git history, and search commits with natural language.",
 };
 
-export default async function DashboardPage() {
-  const session = await getSessionFromCookies();
+interface DashboardPageProps {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}
 
-  if (!session) {
-    return (
-      <main className="mx-auto flex min-h-screen w-full max-w-4xl items-center px-6 py-10">
-        <Card className="w-full">
-          <CardHeader>
-            <CardTitle className="text-3xl">Connect GitHub to Start Indexing</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4 text-slate-300">
-            <p>
-              Sign in with GitHub to pull commit history, PRs, and issues from repositories you already
-              have access to.
-            </p>
-            <Button asChild>
-              <a href="/api/auth/github?action=login" className="inline-flex items-center gap-2">
-                <Github className="h-4 w-4" />
-                Continue with GitHub
-              </a>
-            </Button>
-          </CardContent>
-        </Card>
-      </main>
-    );
+function getParamValue(
+  value: string | string[] | undefined,
+): string | null {
+  if (Array.isArray(value)) {
+    return value[0] ?? null;
   }
+  return value ?? null;
+}
 
-  const paid = await hasPaywallCookie();
+const dashboardErrors: Record<string, string> = {
+  "missing-email": "Enter the same email used at Stripe checkout.",
+  "payment-not-found": "No successful payment is on record for that email yet. If you just paid, wait 1 minute and retry.",
+};
 
-  if (!paid) {
-    return (
-      <main className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-6 py-10">
-        <header className="space-y-3">
-          <p className="text-sm uppercase tracking-widest text-slate-400">Account</p>
-          <h1 className="text-4xl font-semibold">Welcome, {session.user.name}</h1>
-          <p className="text-slate-300">
-            Your GitHub account is connected. Complete checkout to unlock syncing and natural-language
-            search.
-          </p>
-        </header>
+export default async function DashboardPage({ searchParams }: DashboardPageProps) {
+  const params = (await searchParams) ?? {};
+  const selectedRepo = getParamValue(params.repo) ?? "";
+  const errorCode = getParamValue(params.error);
+  const accessGranted = getParamValue(params.access) === "granted";
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-xl">
-              <Lock className="h-5 w-5 text-sky-400" />
-              Paid Access Required
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4 text-slate-300">
-            <p>
-              Git history indexing and search are behind a paywall. After purchase, activate your access
-              cookie on this device.
-            </p>
-            <PricingCards
-              userLogin={session.user.login}
-              userEmail={session.user.email}
-              showActivationButton
-            />
-          </CardContent>
-        </Card>
-      </main>
-    );
-  }
-
-  const [repos, indexedRepos] = await Promise.all([
-    listAccessibleRepos(session.accessToken),
-    listIndexedReposForUser(session.user.login)
-  ]);
+  const cookieStore = await cookies();
+  const hasPaidAccess = cookieStore.get(PAID_ACCESS_COOKIE)?.value === "true";
+  const hasGitHubConnection = Boolean(cookieStore.get(GITHUB_TOKEN_COOKIE)?.value);
+  const paymentLink = process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK;
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-10">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="text-sm uppercase tracking-widest text-slate-400">Dashboard</p>
-          <h1 className="text-4xl font-semibold">Repository Indexing</h1>
-          <p className="mt-2 text-slate-300">
-            Sync one or more repositories, then ask natural-language questions over real commit history.
+    <main className="min-h-screen bg-[#0d1117] px-4 py-8 text-zinc-100 sm:px-6 lg:px-10">
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
+        <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-[#111827] via-[#0f172a] to-[#111827] p-6 sm:p-8">
+          <div className="pointer-events-none absolute -top-14 right-0 h-48 w-48 rounded-full bg-cyan-500/20 blur-3xl" />
+          <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">Git History Search Dashboard</h1>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-300 sm:text-base">
+            Connect GitHub, sync repository history into embeddings, and ask natural-language questions like
+            "which PR fixed auth bugs" with traceable links to commits and issues.
           </p>
-        </div>
-        <div className="flex gap-3">
-          <Button asChild variant="outline">
-            <a href="/api/auth/github?action=logout">Sign Out</a>
-          </Button>
-          <Button asChild>
-            <Link href="/search" className="inline-flex items-center gap-2">
-              Open Search
-              <ArrowRight className="h-4 w-4" />
-            </Link>
-          </Button>
-        </div>
-      </header>
+        </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-lg">
-            <SearchCode className="h-5 w-5 text-sky-400" />
-            Connected GitHub User: {session.user.login}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm text-slate-300">
-          {repos.length} repositories available in this account. Sync the repo you want to search.
-        </CardContent>
-      </Card>
+        {!hasPaidAccess ? (
+          <Card className="border border-cyan-500/25 bg-[#111827]/90">
+            <CardHeader>
+              <CardTitle className="text-white">Unlock access</CardTitle>
+              <CardDescription>
+                The working search tool is paywalled. Checkout is handled by Stripe Payment Link, then claim access with the same email.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {paymentLink ? (
+                <a href={paymentLink} className="inline-flex">
+                  <Button className="h-10 bg-cyan-600 px-5 text-white hover:bg-cyan-500">Buy access on Stripe</Button>
+                </a>
+              ) : (
+                <p className="text-sm text-amber-300">
+                  NEXT_PUBLIC_STRIPE_PAYMENT_LINK is not set. Add it in your environment.
+                </p>
+              )}
 
-      <RepoSelector repos={repos} indexedRepos={indexedRepos} />
+              <form action="/api/access/claim" method="post" className="grid gap-3 sm:grid-cols-[1fr_auto]">
+                <input
+                  type="email"
+                  name="email"
+                  required
+                  placeholder="you@company.com"
+                  className="h-10 rounded-lg border border-white/15 bg-[#0b1220] px-3 text-sm text-zinc-100 outline-none ring-cyan-500/30 focus:ring"
+                />
+                <Button type="submit" className="h-10 bg-zinc-100 text-zinc-900 hover:bg-white">
+                  Claim paid access
+                </Button>
+              </form>
+
+              {errorCode ? <p className="text-sm text-rose-300">{dashboardErrors[errorCode] ?? errorCode}</p> : null}
+
+              <Accordion type="single" collapsible>
+                <AccordionItem value="billing-help" className="border-white/10">
+                  <AccordionTrigger className="text-sm text-zinc-100">Why do I need to claim access?</AccordionTrigger>
+                  <AccordionContent className="text-sm text-zinc-300">
+                    Stripe webhooks mark your purchase server-side. Claiming with your checkout email creates your dashboard cookie so future API
+                    calls are automatically authorized.
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
+            </CardContent>
+          </Card>
+        ) : (
+          <>
+            {accessGranted ? (
+              <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
+                Access granted. You can now sync repositories and run semantic history search.
+              </p>
+            ) : null}
+
+            <RepoConnector hasGitHubConnection={hasGitHubConnection} selectedRepo={selectedRepo} />
+            <SearchInterface repoFullName={selectedRepo} />
+          </>
+        )}
+      </div>
     </main>
   );
 }

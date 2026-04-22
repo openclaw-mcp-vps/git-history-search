@@ -1,240 +1,268 @@
 import { Octokit } from "@octokit/rest";
-import type { AuthUser } from "@/lib/session";
 
-export interface GitHubRepoSummary {
+export const GITHUB_STATE_COOKIE = "ghs_github_state";
+export const GITHUB_TOKEN_COOKIE = "ghs_github_token";
+export const GITHUB_LOGIN_COOKIE = "ghs_github_login";
+
+const MAX_COMMITS_TO_INDEX = 24;
+const MAX_PULLS_TO_INDEX = 32;
+const MAX_ISSUES_TO_INDEX = 32;
+
+export type RepoArtifactType = "commit" | "pull_request" | "issue";
+
+export interface IndexableRepoArtifact {
+  id: string;
+  sourceType: RepoArtifactType;
+  sourceId: string;
+  title: string;
+  body: string;
+  url: string;
+  authoredAt: string;
+}
+
+export interface RepoSummary {
   id: number;
   fullName: string;
+  description: string | null;
   private: boolean;
   defaultBranch: string;
   updatedAt: string;
 }
 
-export interface HistoryDocument {
-  id: string;
-  repository: string;
-  type: "commit" | "pr" | "issue";
-  title: string;
-  text: string;
-  url: string;
-  createdAt: string;
+export interface RepoHistorySnapshot {
+  repoFullName: string;
+  defaultBranch: string;
+  commits: number;
+  pullRequests: number;
+  issues: number;
+  artifacts: IndexableRepoArtifact[];
 }
 
-function requiredEnv(name: string): string {
-  const value = process.env[name];
+function parseRepoFullName(repoFullName: string): { owner: string; repo: string } {
+  const [owner, repo] = repoFullName.split("/");
+  if (!owner || !repo) {
+    throw new Error("Repository must be in owner/repo format.");
+  }
+  return { owner, repo };
+}
+
+function truncate(value: string | null | undefined, maxLength: number): string {
   if (!value) {
-    throw new Error(`${name} is not configured`);
+    return "";
+  }
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function getOctokit(token: string): Octokit {
+  return new Octokit({ auth: token });
+}
+
+export function buildGitHubAuthorizeUrl(origin: string, state: string): string {
+  if (!process.env.GITHUB_CLIENT_ID) {
+    throw new Error("Missing GITHUB_CLIENT_ID environment variable.");
   }
 
-  return value;
+  const callbackUrl = new URL("/api/auth/github", origin).toString();
+  const url = new URL("https://github.com/login/oauth/authorize");
+  url.searchParams.set("client_id", process.env.GITHUB_CLIENT_ID);
+  url.searchParams.set("redirect_uri", callbackUrl);
+  url.searchParams.set("scope", "repo read:org");
+  url.searchParams.set("state", state);
+  url.searchParams.set("allow_signup", "true");
+  return url.toString();
 }
 
-export function getOctokit(accessToken: string): Octokit {
-  return new Octokit({ auth: accessToken });
-}
+export async function exchangeGitHubCodeForToken(
+  code: string,
+  origin: string,
+): Promise<string> {
+  const clientId = process.env.GITHUB_CLIENT_ID;
+  const clientSecret = process.env.GITHUB_CLIENT_SECRET;
 
-export async function exchangeCodeForToken(code: string): Promise<string> {
-  const clientId = requiredEnv("GITHUB_CLIENT_ID");
-  const clientSecret = requiredEnv("GITHUB_CLIENT_SECRET");
+  if (!clientId || !clientSecret) {
+    throw new Error("Missing GITHUB_CLIENT_ID or GITHUB_CLIENT_SECRET.");
+  }
+
+  const redirectUri = new URL("/api/auth/github", origin).toString();
 
   const response = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: {
       Accept: "application/json",
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
       client_id: clientId,
       client_secret: clientSecret,
-      code
-    })
+      code,
+      redirect_uri: redirectUri,
+    }),
+    cache: "no-store",
   });
 
   if (!response.ok) {
-    throw new Error(`GitHub OAuth exchange failed: ${response.status}`);
+    throw new Error("GitHub OAuth token exchange failed.");
   }
 
-  const payload = (await response.json()) as { access_token?: string; error?: string };
-
-  if (!payload.access_token) {
-    throw new Error(payload.error || "GitHub did not return access_token");
-  }
-
-  return payload.access_token;
-}
-
-async function fetchPrimaryEmail(octokit: Octokit): Promise<string | undefined> {
-  try {
-    const emailResp = await octokit.request("GET /user/emails", {
-      per_page: 100
-    });
-
-    const primary = emailResp.data.find((entry) => entry.primary && entry.verified);
-    return primary?.email;
-  } catch {
-    return undefined;
-  }
-}
-
-export async function getAuthenticatedUser(accessToken: string): Promise<AuthUser> {
-  const octokit = getOctokit(accessToken);
-  const { data } = await octokit.users.getAuthenticated();
-  const fallbackName = data.name?.trim() || data.login;
-  const email = data.email || (await fetchPrimaryEmail(octokit));
-
-  return {
-    id: data.id,
-    login: data.login,
-    name: fallbackName,
-    email: email || undefined,
-    avatarUrl: data.avatar_url
+  const json = (await response.json()) as {
+    access_token?: string;
+    error_description?: string;
   };
-}
 
-export async function listAccessibleRepos(accessToken: string): Promise<GitHubRepoSummary[]> {
-  const octokit = getOctokit(accessToken);
-  const repos: GitHubRepoSummary[] = [];
-
-  let page = 1;
-  while (page <= 4) {
-    const response = await octokit.repos.listForAuthenticatedUser({
-      per_page: 100,
-      page,
-      sort: "updated",
-      affiliation: "owner,collaborator,organization_member"
-    });
-
-    repos.push(
-      ...response.data.map((repo) => ({
-        id: repo.id,
-        fullName: repo.full_name,
-        private: repo.private,
-        defaultBranch: repo.default_branch,
-        updatedAt: repo.updated_at || repo.created_at || new Date(0).toISOString()
-      }))
-    );
-
-    if (response.data.length < 100) {
-      break;
-    }
-
-    page += 1;
+  if (!json.access_token) {
+    throw new Error(json.error_description ?? "GitHub did not return an access token.");
   }
 
-  return repos;
+  return json.access_token;
 }
 
-function assertRepoName(fullName: string): { owner: string; repo: string } {
-  const [owner, repo] = fullName.split("/");
-  if (!owner || !repo) {
-    throw new Error("Repository must be in owner/name format");
-  }
-
-  return { owner, repo };
+export async function fetchGitHubViewer(token: string): Promise<{ login: string }> {
+  const octokit = getOctokit(token);
+  const { data } = await octokit.users.getAuthenticated();
+  return { login: data.login };
 }
 
-function sanitize(text: string | null | undefined): string {
-  if (!text) {
-    return "";
-  }
+export async function listGitHubRepos(token: string): Promise<RepoSummary[]> {
+  const octokit = getOctokit(token);
 
-  return text.replace(/\s+/g, " ").trim();
+  const { data } = await octokit.repos.listForAuthenticatedUser({
+    per_page: 100,
+    sort: "updated",
+    affiliation: "owner,collaborator,organization_member",
+  });
+
+  return data.slice(0, 60).map((repo) => ({
+    id: repo.id,
+    fullName: repo.full_name,
+    description: repo.description,
+    private: repo.private,
+    defaultBranch: repo.default_branch,
+    updatedAt: repo.updated_at ?? repo.pushed_at ?? new Date().toISOString(),
+  }));
 }
 
-export async function fetchRepositoryDocuments(
-  accessToken: string,
-  fullName: string
-): Promise<HistoryDocument[]> {
-  const { owner, repo } = assertRepoName(fullName);
-  const octokit = getOctokit(accessToken);
+export async function fetchRepoHistorySnapshot(
+  token: string,
+  repoFullName: string,
+): Promise<RepoHistorySnapshot> {
+  const { owner, repo } = parseRepoFullName(repoFullName);
+  const octokit = getOctokit(token);
 
-  const [commitsResp, pullsResp, issuesResp] = await Promise.all([
-    octokit.repos.listCommits({ owner, repo, per_page: 24 }),
-    octokit.pulls.list({ owner, repo, state: "closed", sort: "updated", direction: "desc", per_page: 24 }),
-    octokit.issues.listForRepo({ owner, repo, state: "all", per_page: 32, sort: "updated", direction: "desc" })
-  ]);
+  const repoResponse = await octokit.repos.get({ owner, repo });
+  const defaultBranch = repoResponse.data.default_branch;
 
-  const docs: HistoryDocument[] = [];
+  const commitList = await octokit.repos.listCommits({
+    owner,
+    repo,
+    sha: defaultBranch,
+    per_page: MAX_COMMITS_TO_INDEX,
+  });
 
-  for (const commit of commitsResp.data.slice(0, 20)) {
-    const detail = await octokit.repos.getCommit({
+  const commitArtifacts: IndexableRepoArtifact[] = [];
+  for (const item of commitList.data) {
+    const details = await octokit.repos.getCommit({
       owner,
       repo,
-      ref: commit.sha
+      ref: item.sha,
     });
 
-    const patchText = (detail.data.files ?? [])
-      .slice(0, 6)
+    const patchPreview = (details.data.files ?? [])
+      .slice(0, 5)
       .map((file) => {
-        const patch = sanitize(file.patch).slice(0, 450);
-        return `File: ${file.filename}\n${patch}`;
+        const patch = truncate(file.patch, 600);
+        return `${file.filename}\n${patch}`;
       })
       .join("\n\n");
 
-    const message = sanitize(commit.commit.message);
-    docs.push({
-      id: `commit:${commit.sha}`,
-      repository: fullName,
-      type: "commit",
-      title: message.split("\n")[0] || commit.sha,
-      url: commit.html_url,
-      createdAt: commit.commit.author?.date || new Date().toISOString(),
-      text: [
-        `Commit SHA: ${commit.sha}`,
-        `Author: ${commit.commit.author?.name || "Unknown"}`,
+    const message = details.data.commit.message;
+    const author = details.data.commit.author?.name ?? "unknown";
+
+    commitArtifacts.push({
+      id: `commit:${details.data.sha}`,
+      sourceType: "commit",
+      sourceId: details.data.sha,
+      title: message.split("\n")[0] ?? details.data.sha,
+      body: [
+        `Commit: ${details.data.sha}`,
+        `Author: ${author}`,
         `Message: ${message}`,
-        `Diff summary:\n${patchText}`
+        patchPreview ? `Patch:\n${patchPreview}` : "",
       ]
-        .join("\n\n")
-        .trim()
+        .filter(Boolean)
+        .join("\n\n"),
+      url: details.data.html_url,
+      authoredAt: details.data.commit.author?.date ?? new Date().toISOString(),
     });
   }
 
-  for (const pr of pullsResp.data) {
-    const mergedAt = pr.merged_at || pr.closed_at || pr.updated_at || pr.created_at;
-    docs.push({
-      id: `pr:${pr.number}`,
-      repository: fullName,
-      type: "pr",
-      title: `#${pr.number} ${sanitize(pr.title)}`,
-      url: pr.html_url,
-      createdAt: mergedAt,
-      text: [
-        `PR #${pr.number}`,
-        `Title: ${sanitize(pr.title)}`,
-        `State: ${pr.state}`,
-        `Merged at: ${pr.merged_at || "not merged"}`,
-        `Body: ${sanitize(pr.body)}`
-      ]
-        .join("\n")
-        .trim()
-    });
-  }
+  const pullsResponse = await octokit.pulls.list({
+    owner,
+    repo,
+    state: "all",
+    sort: "updated",
+    direction: "desc",
+    per_page: MAX_PULLS_TO_INDEX,
+  });
 
-  for (const issue of issuesResp.data) {
-    if (issue.pull_request) {
-      continue;
-    }
+  const pullArtifacts = pullsResponse.data.map((pull) => ({
+    id: `pull:${pull.number}`,
+    sourceType: "pull_request" as const,
+    sourceId: String(pull.number),
+    title: pull.title,
+    body: [
+      `PR #${pull.number}`,
+      `State: ${pull.state}`,
+      pull.merged_at ? `Merged at: ${pull.merged_at}` : "",
+      pull.body ? truncate(pull.body, 6000) : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    url: pull.html_url,
+    authoredAt: pull.updated_at,
+  }));
 
-    docs.push({
+  const issuesResponse = await octokit.issues.listForRepo({
+    owner,
+    repo,
+    state: "all",
+    sort: "updated",
+    direction: "desc",
+    per_page: MAX_ISSUES_TO_INDEX,
+  });
+
+  const issueArtifacts = issuesResponse.data
+    .filter((issue) => !issue.pull_request)
+    .map((issue) => ({
       id: `issue:${issue.number}`,
-      repository: fullName,
-      type: "issue",
-      title: `#${issue.number} ${sanitize(issue.title)}`,
-      url: issue.html_url,
-      createdAt: issue.updated_at || issue.created_at,
-      text: [
+      sourceType: "issue" as const,
+      sourceId: String(issue.number),
+      title: issue.title,
+      body: [
         `Issue #${issue.number}`,
-        `Title: ${sanitize(issue.title)}`,
         `State: ${issue.state}`,
-        `Labels: ${(issue.labels || [])
-          .map((label) => (typeof label === "string" ? label : label.name || ""))
-          .join(", ")}`,
-        `Body: ${sanitize(issue.body)}`
+        issue.labels.length > 0
+          ? `Labels: ${issue.labels
+              .map((label) => (typeof label === "string" ? label : label.name ?? ""))
+              .filter(Boolean)
+              .join(", ")}`
+          : "",
+        issue.body ? truncate(issue.body, 6000) : "",
       ]
-        .join("\n")
-        .trim()
-    });
-  }
+        .filter(Boolean)
+        .join("\n\n"),
+      url: issue.html_url,
+      authoredAt: issue.updated_at,
+    }));
 
-  return docs;
+  return {
+    repoFullName,
+    defaultBranch,
+    commits: commitArtifacts.length,
+    pullRequests: pullArtifacts.length,
+    issues: issueArtifacts.length,
+    artifacts: [...commitArtifacts, ...pullArtifacts, ...issueArtifacts],
+  };
 }

@@ -1,104 +1,157 @@
 import OpenAI from "openai";
 
-export interface SearchContextItem {
-  type: string;
+const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL ?? "text-embedding-3-small";
+const SEARCH_SUMMARY_MODEL = process.env.OPENAI_SEARCH_MODEL ?? "gpt-4.1-mini";
+const FALLBACK_DIMENSION = 192;
+
+export interface SearchResultForSummary {
   title: string;
+  sourceType: string;
   url: string;
   excerpt: string;
-  score: number;
-  createdAt: string;
 }
 
-let cachedClient: OpenAI | null = null;
+let client: OpenAI | null = null;
 
-export function hasOpenAIKey(): boolean {
-  return Boolean(process.env.OPENAI_API_KEY);
-}
-
-function getClient(): OpenAI {
+function getOpenAIClient(): OpenAI | null {
   if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is not configured");
+    return null;
   }
-
-  if (!cachedClient) {
-    cachedClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  if (!client) {
+    client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   }
-
-  return cachedClient;
+  return client;
 }
 
-export async function createEmbeddings(texts: string[]): Promise<number[][]> {
-  if (!hasOpenAIKey()) {
+function normalizeVector(values: number[]): number[] {
+  const magnitude = Math.sqrt(values.reduce((acc, value) => acc + value * value, 0));
+  if (magnitude === 0) {
+    return values;
+  }
+  return values.map((value) => value / magnitude);
+}
+
+function hashToken(token: string): number {
+  let hash = 0;
+  for (let i = 0; i < token.length; i += 1) {
+    hash = (hash << 5) - hash + token.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function fallbackEmbedding(text: string): number[] {
+  const vector = new Array<number>(FALLBACK_DIMENSION).fill(0);
+  const tokens = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 1);
+
+  for (const token of tokens) {
+    const index = hashToken(token) % FALLBACK_DIMENSION;
+    const sign = hashToken(`${token}-sign`) % 2 === 0 ? 1 : -1;
+    vector[index] += sign;
+  }
+
+  return normalizeVector(vector);
+}
+
+export async function embedTexts(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) {
     return [];
   }
 
-  const cleanTexts = texts.map((item) => item.trim()).filter(Boolean);
-  if (cleanTexts.length === 0) {
-    return [];
+  const openai = getOpenAIClient();
+  if (!openai) {
+    return texts.map((text) => fallbackEmbedding(text));
   }
 
-  const client = getClient();
-  const response = await client.embeddings.create({
-    model: process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small",
-    input: cleanTexts
-  });
-
-  return response.data.map((item) => item.embedding);
-}
-
-function fallbackAnswer(query: string, matches: SearchContextItem[]): string {
-  if (matches.length === 0) {
-    return `I couldn't find an indexed commit, PR, or issue matching "${query}". Sync a repository first, then retry.`;
+  try {
+    const response = await openai.embeddings.create({
+      model: EMBEDDING_MODEL,
+      input: texts,
+    });
+    return response.data.map((entry) => entry.embedding);
+  } catch {
+    return texts.map((text) => fallbackEmbedding(text));
   }
-
-  const bullets = matches
-    .slice(0, 5)
-    .map((match, index) => `${index + 1}. [${match.type.toUpperCase()}] ${match.title} (${match.url})`)
-    .join("\n");
-
-  return `Top history matches for "${query}":\n${bullets}`;
 }
 
-export async function answerWithContext(
+export async function embedQuery(query: string): Promise<number[]> {
+  const [embedding] = await embedTexts([query]);
+  return embedding;
+}
+
+function buildFallbackSummary(
   query: string,
-  matches: SearchContextItem[]
-): Promise<string> {
-  if (!hasOpenAIKey()) {
-    return fallbackAnswer(query, matches);
+  results: SearchResultForSummary[],
+): string {
+  if (results.length === 0) {
+    return `No indexed history matched "${query}" yet. Sync the repository first.`;
   }
 
-  const client = getClient();
-  const context = matches
-    .map((match, index) => {
-      return [
-        `Result ${index + 1}`,
-        `Type: ${match.type}`,
-        `Title: ${match.title}`,
-        `URL: ${match.url}`,
-        `Created: ${match.createdAt}`,
-        `Excerpt: ${match.excerpt}`
-      ].join("\n");
-    })
-    .join("\n\n");
+  const topSources = results
+    .slice(0, 3)
+    .map((result) => `${result.sourceType}: ${result.title}`)
+    .join(" | ");
 
-  const completion = await client.chat.completions.create({
-    model: process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini",
-    temperature: 0.2,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You answer developer git-history questions. Use only the provided context. Highlight concrete commit/PR/issue evidence with why each item is relevant."
-      },
-      {
-        role: "user",
-        content: `Question: ${query}\n\nContext:\n${context}`
-      }
-    ]
-  });
+  return `Top matches for "${query}" came from ${topSources}. Open the linked commits, PRs, or issues for exact context.`;
+}
 
-  return (
-    completion.choices[0]?.message?.content?.trim() ||
-    fallbackAnswer(query, matches)
-  );
+export async function summarizeSearchResults(
+  query: string,
+  results: SearchResultForSummary[],
+): Promise<string> {
+  if (results.length === 0) {
+    return `I could not find relevant indexed commits, PRs, or issues for "${query}".`;
+  }
+
+  const openai = getOpenAIClient();
+  if (!openai) {
+    return buildFallbackSummary(query, results);
+  }
+
+  try {
+    const compactContext = results.slice(0, 8).map((result) => ({
+      sourceType: result.sourceType,
+      title: result.title,
+      excerpt: result.excerpt,
+      url: result.url,
+    }));
+
+    const response = await openai.responses.create({
+      model: SEARCH_SUMMARY_MODEL,
+      max_output_tokens: 280,
+      input: [
+        {
+          role: "system",
+          content: [
+            {
+              type: "input_text",
+              text: "You summarize git history search results for engineers. Be concise, concrete, and mention what changed and where to click.",
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: `Query: ${query}\n\nSearch results:\n${JSON.stringify(compactContext, null, 2)}`,
+            },
+          ],
+        },
+      ],
+    });
+
+    const text = response.output_text?.trim();
+    if (!text) {
+      return buildFallbackSummary(query, results);
+    }
+
+    return text;
+  } catch {
+    return buildFallbackSummary(query, results);
+  }
 }

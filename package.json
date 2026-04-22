@@ -1,6 +1,6 @@
 {
   "name": "git-history-search",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,26 +9,30 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@base-ui/react": "^1.4.1",
     "@lemonsqueezy/lemonsqueezy.js": "^4.0.0",
-    "@octokit/rest": "^21.1.1",
-    "@radix-ui/react-slot": "^1.2.4",
+    "@octokit/rest": "^22.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "framer-motion": "^12.23.24",
-    "lucide-react": "^0.552.0",
+    "lucide-react": "^0.511.0",
     "next": "15.5.15",
-    "openai": "^6.1.0",
+    "openai": "^5.12.2",
     "pinecone-client": "^2.0.0",
-    "react": "19.2.0",
-    "react-dom": "19.2.0",
-    "tailwind-merge": "^3.3.1",
-    "tailwindcss": "^4.1.16"
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "shadcn": "^4.4.0",
+    "tailwind-merge": "^3.5.0",
+    "tw-animate-css": "^1.4.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.1.16",
-    "@types/node": "^24.7.2",
-    "@types/react": "^19.2.2",
-    "@types/react-dom": "^19.2.2",
-    "typescript": "^5.9.3"
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "15.5.15",
+    "tailwindcss": "^4",
+    "typescript": "^5"
   }
 }
